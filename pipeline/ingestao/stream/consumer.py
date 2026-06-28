@@ -66,8 +66,11 @@ CONTAINER_BRONZE = "bronze"
 output_path = f"abfss://{CONTAINER_BRONZE}@{STORAGE_ACCOUNT}.dfs.core.windows.net/streaming_ingest/"
 checkpoint_path = f"abfss://{CONTAINER_BRONZE}@{STORAGE_ACCOUNT}.dfs.core.windows.net/checkpoints/streaming_ingest/"
 
-# 5. Escrita contínua aplicando o particionamento solicitado
-query = df_final_stream.writeStream \
+# 5. OTIMIZAÇÃO: Seleciona apenas o dado útil e as partições antes de gravar
+df_bronze_clean = df_final_stream.select("_raw_data", "tipo_mensagem", "ano", "mes", "dia")
+
+# 6. Escrita contínua aplicando o particionamento solicitado
+query = df_bronze_clean.writeStream \
     .format("json") \
     .outputMode("append") \
     .option("checkpointLocation", checkpoint_path) \
