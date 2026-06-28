@@ -16,7 +16,7 @@ def get_args():
     return args
 
 args = get_args()
-STORAGE_ACCOUNT = args.get("STORAGE_ACCOUNT", "sttechchallengefase2") 
+STORAGE_ACCOUNT = args.get("STORAGE_ACCOUNT", "stterraformstate") 
 TABLE_NAME = args.get("TABLE_NAME") 
 
 # Inicializa a Sessão Spark nativa
