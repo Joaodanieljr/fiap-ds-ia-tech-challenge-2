@@ -1,27 +1,41 @@
 """
 Simulador de Produtor - Envio das 4 Estruturas Reais de Alfabetização
-Lendo chaves de forma segura através de variáveis de ambiente (.env)
 """
-import os
-import time
+import argparse
 import json
+import os
 import random
+import time
 from datetime import datetime
-from dotenv import load_dotenv
-from azure.eventhub import EventHubProducerClient, EventEventData
 
-# 1. Carrega as variáveis do arquivo .env localizado na raiz
+from azure.eventhub import EventEventData, EventHubProducerClient
+from dotenv import load_dotenv
+
+from pipeline.ingestao.config import resolve_runtime_config, validate_runtime_config
+
 load_dotenv()
 
-# 2. Captura as variáveis de ambiente com tratamento de erro básico
-CONNECTION_STR = os.getenv("EH_CONNECTION_STRING")
-EVENTHUB_NAME = os.getenv("EVENTHUB_NAME")
 
-if not CONNECTION_STR or not EVENTHUB_NAME:
-    raise ValueError(
-        "ERRO: As variáveis 'EH_CONNECTION_STRING' ou 'EVENTHUB_NAME' "
-        "não foram encontradas no arquivo .env!"
-    )
+def parse_args():
+    parser = argparse.ArgumentParser(description="Produtor de eventos para Event Hubs")
+    parser.add_argument("--eventhub_connection_string", default=None)
+    parser.add_argument("--eventhub_name", default=None)
+    return parser.parse_args()
+
+
+args = parse_args()
+config = resolve_runtime_config({
+    "eventhub_connection_string": args.eventhub_connection_string,
+    "eventhub_name": args.eventhub_name,
+})
+config = validate_runtime_config(
+    config,
+    required_keys=["eventhub_connection_string", "eventhub_name"],
+    context="streaming producer",
+)
+
+CONNECTION_STR = config["eventhub_connection_string"]
+EVENTHUB_NAME = config["eventhub_name"]
 
 # --- Funções para gerar as 4 mensagens baseadas nos seus prints reais ---
 
