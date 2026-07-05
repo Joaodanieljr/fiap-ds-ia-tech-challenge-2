@@ -4,10 +4,22 @@ variable "azure_region" {
   default     = "eastus" 
 }
 
-variable "storage_account_name" {
-  description = "Nome da conta"
+variable "resource_group_name" {
+  description = "Nome do resource group a ser criado"
   type        = string
-  default     = "alfabetizacao" #TODO AJUSTAR NOME DA CONTA
+  default     = "rg-tech-challenge-fase2"
+}
+
+variable "storage_account_name" {
+  description = "Nome da Storage Account (deve ser globalmente único, minúsculo e sem traços)"
+  type        = string
+  default     = "alfabetizacao"
+}
+
+variable "data_factory_name" {
+  description = "Nome do Azure Data Factory"
+  type        = string
+  default     = "adf-alfabetizacao-pipeline"
 }
 
 variable "environment" {

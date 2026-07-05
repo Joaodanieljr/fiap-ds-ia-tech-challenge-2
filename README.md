@@ -2,12 +2,14 @@
 
 Este repositório reúne uma solução de dados para o Tech Challenge 2 da FIAP, com foco em dados educacionais de alfabetização. O projeto usa uma arquitetura em camadas (Medallion) para receber, transformar e disponibilizar dados em lote e em tempo real, além de provisionar a infraestrutura básica com Terraform.
 
+A proposta é demonstrar um fluxo completo de dados, desde a ingestão até a geração de tabelas analíticas, com foco em clareza operacional e facilidade de execução em ambientes Azure.
+
 ## Visão geral
 
-A proposta da solução é demonstrar um fluxo completo de dados com:
+A solução contempla:
 
 - ingestão em lote de arquivos CSV para a camada Bronze;
-- ingestão em streaming com Azure Event Hubs;
+- simulação local de streaming para geração e consumo de eventos;
 - transformação e padronização nas camadas Prata e Ouro;
 - provisionamento inicial de recursos em Azure com Terraform.
 
@@ -26,7 +28,7 @@ Bronze -> Prata -> Ouro
 ### Componentes principais
 
 - Batch: leitura de arquivos CSV e gravação particionada na camada Bronze.
-- Streaming: produtor envia eventos simulados para o Event Hub e o consumidor grava os payloads brutos na camada Bronze.
+- Streaming: produtor envia eventos simulados localmente e o consumidor grava os payloads brutos na camada Bronze.
 - Notebooks: transformações de Bronze para Prata e de Prata para Ouro.
 - Infraestrutura: recursos do Azure Storage, containers e Data Factory provisionados via Terraform.
 
@@ -64,33 +66,42 @@ fiap-ds-ia-tech-challenge-2/
 
 ## O que precisa existir no Azure antes de rodar
 
-Antes de usar os fluxos de batch ou streaming, a pessoa precisa ter criado no Azure:
+> Importante: o projeto não roda de forma totalmente autônoma apenas com o código. Ele depende de alguns recursos Azure já criados ou provisionados previamente.
+
+Antes de usar o fluxo de batch e a simulação local de streaming, a pessoa precisa ter criado no Azure:
 
 1. um Resource Group;
 2. uma Storage Account com Data Lake Gen2 habilitado;
 3. um container chamado bronze;
-4. um Event Hub Namespace e um Event Hub;
-5. uma connection string com permissão de envio/recebimento no Event Hub;
-6. se for usar o batch, um caminho de entrada com um arquivo CSV para leitura.
+4. se for usar o batch, um caminho de entrada com um arquivo CSV para leitura.
 
 ### Checklist de criação no Azure
 
 1. Acesse o portal Azure ou Azure CLI e crie um Resource Group.
 2. Crie uma Storage Account e ative o suporte a Data Lake Gen2.
 3. Dentro da Storage Account, crie o container bronze.
-4. Crie um Event Hub Namespace e, dentro dele, um Event Hub.
-5. Gere ou copie a connection string do Event Hub com permissões para Send e Listen.
-6. Se o batch for usado, coloque um arquivo CSV em um caminho acessível pela aplicação, por exemplo em uma pasta de entrada no Data Lake ou em um diretório local.
-7. Preencha as variáveis de ambiente com os valores corretos.
+4. Se o batch for usado, coloque um arquivo CSV em um caminho acessível pela aplicação, por exemplo em uma pasta de entrada no Data Lake ou em um diretório local.
+5. Preencha as variáveis de ambiente com os valores corretos.
 
 O projeto espera que os nomes e valores abaixo sejam informados nas variáveis de ambiente:
 
 - STORAGE_ACCOUNT_NAME ou o nome da Storage Account usada pelo script batch;
-- EH_CONNECTION_STRING com a connection string do Event Hub;
-- EVENTHUB_NAME com o nome do Event Hub;
 - TABLE_NAME com o nome da entidade/tabela processada.
 
 Se a infraestrutura ainda não existir, o Terraform pode ser usado para provisionar a base inicial a partir de [infra/terraform/main.tf](infra/terraform/main.tf).
+
+### Provisionamento com Terraform
+
+Exemplo de fluxo inicial:
+
+```bash
+cd infra/terraform
+terraform init
+terraform plan -var="resource_group_name=rg-tech-challenge-fase2" -var="storage_account_name=seu-storage-account" -var="data_factory_name=adf-alfabetizacao-pipeline"
+terraform apply -var="resource_group_name=rg-tech-challenge-fase2" -var="storage_account_name=seu-storage-account" -var="data_factory_name=adf-alfabetizacao-pipeline"
+```
+
+Depois do apply, os outputs retornam o nome do resource group, da Storage Account e do Data Factory para facilitar a configuração das variáveis do projeto.
 
 ## Configuração rápida
 
@@ -116,22 +127,24 @@ Exemplo de conteúdo do arquivo .env para Azure:
 
 ```env
 STORAGE_ACCOUNT_NAME=seu-storage-account
-EH_CONNECTION_STRING=Endpoint=sb://seu-namespace.servicebus.windows.net/;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=sua-chave
-EVENTHUB_NAME=seu-event-hub
 TABLE_NAME=alfabetizacao
 ```
 
 ## Variáveis de ambiente
 
+Os valores abaixo devem ser preenchidos no arquivo .env antes de executar qualquer fluxo que dependa de Azure ou dos notebooks.
+
 As principais variáveis esperadas são:
 
 - STORAGE_ACCOUNT_NAME: nome da Storage Account do Azure.
-- EH_CONNECTION_STRING: string de conexão do Azure Event Hubs.
-- EVENTHUB_NAME: nome do Event Hub utilizado pelo producer/consumer.
 - TABLE_NAME: nome da tabela/entidade processada no batch.
+- KEY_VAULT_URL: URL do Azure Key Vault usado pelos notebooks para ler a chave de acesso.
+- KEY_VAULT_SECRET_NAME: nome do segredo que armazena a chave da Storage Account.
 - AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID: credenciais opcionais para autenticação Azure.
 
 ## Como executar
+
+A execução pode seguir duas abordagens principais:
 
 ### Opção A: execução com Azure (ambiente real)
 
@@ -157,7 +170,7 @@ python pipeline/ingestao/stream/consumer.py
 python pipeline/ingestao/stream/producer.py
 ```
 
-O produtor gera mensagens simuladas e o consumidor lê essas mensagens e grava os payloads na camada Bronze.
+O produtor gera mensagens simuladas localmente e o consumidor lê essas mensagens e grava os payloads na camada Bronze.
 
 ### 3. Pipelines de transformação
 
@@ -186,12 +199,12 @@ Essa opção é útil para testar a lógica de preparação de dados e a estrutu
 
 ## Checklist final antes de rodar
 
+Antes de iniciar a execução, confirme os itens abaixo:
+
 - [ ] Python instalado
 - [ ] dependências instaladas com pip install -r requirements.txt
 - [ ] arquivo .env criado e preenchido
 - [ ] Resource Group criado no Azure
 - [ ] Storage Account criada e container bronze disponível
-- [ ] Event Hub Namespace e Event Hub criados
-- [ ] connection string configurada
 - [ ] arquivo CSV disponível para o batch, se aplicável
 

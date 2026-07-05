@@ -3,16 +3,11 @@ terraform {
   required_providers {
     azurerm = {
       source  = "hashicorp/azurerm"
-      version = "~> 3.0" # ou ~> 4.0 dependendo do seu ambiente
+      version = "~> 3.0"
     }
   }
 
-  backend "azurerm" {
-    resource_group_name  = "rg-terraform-state"
-    storage_account_name = "stterraformstate"
-    container_name       = "tfstate"
-    key                  = "alfabetizacao/terraform.tfstate"
-  }
+  backend "azurerm" {}
 }
 
 provider "azurerm" {
@@ -21,7 +16,7 @@ provider "azurerm" {
 
 # Grupo de Recursos
 resource "azurerm_resource_group" "rg" {
-  name     = "rg-tech-challenge-fase2"
+  name     = var.resource_group_name
   location = var.azure_region
   tags     = local.common_tags
 }
@@ -79,7 +74,7 @@ resource "azurerm_storage_management_policy" "data_lake_lifecycle" {
 
 # 3. Azure Data Factory (ADF)
 resource "azurerm_data_factory" "adf" {
-  name                = "adf-alfabetizacao-pipeline"
+  name                = var.data_factory_name
   location            = azurerm_resource_group.rg.location
   resource_group_name = azurerm_resource_group.rg.name
   tags                = local.common_tags
@@ -92,4 +87,20 @@ locals {
     Environment = var.environment
     ManagedBy   = "terraform"
   }
+}
+
+output "resource_group_name" {
+  value = azurerm_resource_group.rg.name
+}
+
+output "storage_account_name" {
+  value = azurerm_storage_account.data_lake.name
+}
+
+output "storage_account_id" {
+  value = azurerm_storage_account.data_lake.id
+}
+
+output "data_factory_name" {
+  value = azurerm_data_factory.adf.name
 }
