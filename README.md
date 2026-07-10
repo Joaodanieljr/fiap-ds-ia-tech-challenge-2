@@ -17,6 +17,8 @@ A solução contempla:
 
 A arquitetura segue o modelo Medallion com separação entre dados brutos, dados tratados e dados analíticos.
 
+Para detalhes sobre o modelo e os padrões adotados, consulte `doc/arquitetura/arquitetura.md`. Informações complementares de FinOps e custos operacionais estão disponíveis em `doc/finops/`.
+
 ```text
 Fontes de dados
   ├── Batch -> Bronze
@@ -37,8 +39,10 @@ Bronze -> Prata -> Ouro
 ```text
 fiap-ds-ia-tech-challenge-2/
 ├── doc/
-│   └── arquitetura/
-│       └── arquitetura.md
+│   ├── arquitetura/
+│   │   └── arquitetura.md
+│   ├── finops/
+│   └── uteis/
 ├── infra/
 │   └── terraform/
 │       ├── main.tf
@@ -46,11 +50,22 @@ fiap-ds-ia-tech-challenge-2/
 ├── pipeline/
 │   ├── camadas/
 │   │   ├── bronze/
+│   │   │   └── bronze_alfabetizacao.ipynb
 │   │   ├── prata/
+│   │   │   └── silver_alfabetizacao.ipynb
 │   │   └── ouro/
+│   │       └── gold_alfabetizacao.ipynb
 │   └── ingestao/
 │       ├── batch/
-│       └── stream/
+│       │   └── batch.py
+│   │   ├── stream/
+│   │   │   ├── consumer.py
+│   │   │   └── producer.py
+│       ├── config.py
+│       └── mock_support.py
+├── tests/
+│   ├── test_config.py
+│   └── test_mock_support.py
 ├── .env.example
 ├── .gitignore
 ├── requirements.txt
