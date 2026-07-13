@@ -2,6 +2,7 @@
 Azure Spark Job - Ingestão Batch: Metas de Alfabetização
 Fonte: Servidor Web / Base dos Dados (Arquivos CSV)
 Destino: Azure Data Lake Gen2 (ADLS Gen2) - Camada Bronze Particionada (Ano/Mês/Dia)
+
 """
 import argparse
 from datetime import datetime
