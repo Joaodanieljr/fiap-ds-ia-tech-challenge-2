@@ -1,206 +1,209 @@
-# Tech Challenge 2 - FIAP Data Science & Analytics
+# Tech Challenge — Fase 2 · Pipeline Híbrida de Dados de Alfabetização
 
-Este repositório reúne uma solução de dados para o Tech Challenge 2 da FIAP, com foco em dados educacionais de alfabetização. O projeto usa uma arquitetura em camadas (Medallion) para receber, transformar e disponibilizar dados em lote e em tempo real, além de provisionar a infraestrutura básica com Terraform.
+Solução de engenharia de dados para o Tech Challenge 2 (FIAP Pós-Tech), construída sobre dados educacionais de alfabetização infantil no Brasil. O projeto implementa uma **pipeline híbrida (batch + streaming)** em **arquitetura Medalhão** na Azure, do dado bruto até a camada analítica consumida por dashboard em Power BI.
 
-A proposta é demonstrar um fluxo completo de dados, desde a ingestão até a geração de tabelas analíticas, com foco em clareza operacional e facilidade de execução em ambientes Azure.
+**Equipe:** Vinicius Moreira · João Daniel · Samara Siqueira
 
-## Visão geral
+---
 
-A solução contempla:
+## 1. Contexto do problema
 
-- ingestão em lote de arquivos CSV para a camada Bronze;
-- simulação local de streaming para geração e consumo de eventos;
-- transformação e padronização nas camadas Prata e Ouro;
-- provisionamento inicial de recursos em Azure com Terraform.
+O Brasil acompanha a alfabetização na idade certa por meio do **Indicador Criança Alfabetizada** (Compromisso Nacional Criança Alfabetizada). Cada município e estado possui metas pactuadas de alfabetização até 2030, comparadas anualmente com os resultados reais das avaliações estaduais (AEEB/INEP).
 
-## Arquitetura do projeto
+Este projeto integra essas fontes em uma pipeline única, permitindo responder perguntas como: *quais estados superaram suas metas? Onde o gap é maior? Qual a proficiência média dos alunos avaliados por município?*
 
-A arquitetura segue o modelo Medallion com separação entre dados brutos, dados tratados e dados analíticos.
+## 2. Fontes de dados
 
-Para detalhes sobre o modelo e os padrões adotados, consulte `doc/arquitetura/arquitetura.md`. Informações complementares de FinOps e custos operacionais estão disponíveis em `doc/finops/`.
+O desafio exige a integração de 6 entidades, obtidas de duas origens públicas:
+
+| Entidade | Origem | Formato |
+|---|---|---|
+| UF | Base dos Dados (`br_inep_avaliacao_alfabetizacao`) | CSV |
+| Município | Base dos Dados | CSV |
+| Meta Alfabetização Brasil | Base dos Dados | CSV |
+| Meta Alfabetização por UF | Base dos Dados | CSV |
+| Meta Alfabetização por Município | Base dos Dados | CSV |
+| Dados de alunos (TS_ALUNO, 2,2M linhas) | INEP — Microdados AEEB 2025 | CSV |
+
+Complementarmente: TS_MUNICIPIO, TS_ESTADO e TS_ITEM (INEP) e a tabela `dicionario` da Base dos Dados (traduções de códigos, consultada via BigQuery).
+
+## 3. Arquitetura
 
 ```text
-Fontes de dados
-  ├── Batch -> Bronze
-  └── Streaming -> Event Hubs -> Bronze
-
-Bronze -> Prata -> Ouro
+FONTES                       INGESTÃO                          MEDALHÃO (ADLS Gen2)              CONSUMO
+──────                       ────────                          ────────────────────              ───────
+Base dos Dados ─┐
+INEP (AEEB) ────┼── Batch (upload CSV) ──────────┐
+                │                                ├──▶ BRONZE ──▶ SILVER ──▶ GOLD ──▶ Power BI
+Eventos ────────┴── producer.py ─▶ Event Hubs ───┘    (bruto)    (limpo)   (star     (Import,
+simulados            └─▶ consumer.py                                        schema)   zero ETL)
+                        (Spark Structured Streaming)
 ```
 
-### Componentes principais
+O diagrama completo está em `doc/arquitetura/` (arquivo draw.io).
 
-- Batch: leitura de arquivos CSV e gravação particionada na camada Bronze.
-- Streaming: produtor envia eventos simulados localmente e o consumidor grava os payloads brutos na camada Bronze.
-- Notebooks: transformações de Bronze para Prata e de Prata para Ouro.
-- Infraestrutura: recursos do Azure Storage, containers e Data Factory provisionados via Terraform.
+**Camadas:**
 
-## Estrutura do repositório
+- **Bronze** — dado bruto convertido para Parquet. Batch (8 fontes CSV) e streaming (4 tipos de evento JSON com schema explícito) convergem no mesmo container; a Silver não distingue a origem.
+- **Silver** — limpeza e padronização: deduplicação, tratamento de nulos em chaves, cast de tipos, normalização de nomes (`NU_ANO`→`ano`, `CO_MUNICIPIO`→`id_municipio`, `SG_UF`→`sigla_uf`) e de valores (`upper`/`trim`).
+- **Gold** — modelo dimensional (star schema): `dim_uf`, `dim_municipio`, `dim_tempo` e **quatro tabelas fato**, cada uma na sua granularidade:
+
+| Fato | Granularidade | Compara |
+|---|---|---|
+| `fato_indicador` | Município × ano × rede | realizado vs. meta municipal (particionado por ano) |
+| `fato_indicador_uf` | UF × ano × rede | realizado vs. meta estadual (rede Pública) |
+| `fato_indicador_brasil` | Brasil × ano | meta nacional |
+| `fato_aluno_agregado` | Município × ano | % alfabetizados, proficiência média e nº de alunos avaliados (só presentes na prova) |
+
+**Notebooks (Azure Synapse, PySpark):** `bronze/silver/gold_alfabetizacao` (pipeline principal) e `bronze/silver/gold_ts_aluno` (pipeline separada para o TS_ALUNO — decisão justificada abaixo).
+
+## 4. Decisões técnicas e trade-offs
+
+**Data Lake (Medalhão) vs. Data Warehouse tradicional.** Optamos por lake em ADLS Gen2 com camadas Medalhão: as fontes são heterogêneas (CSV, JSON de eventos), o volume do TS_ALUNO pede processamento distribuído (Spark), e o custo de storage em lake é muito menor que manter um warehouse dedicado ligado. O "warehouse" surge logicamente na Gold (star schema em Parquet), sem o custo de um servidor SQL dedicado.
+
+**Batch vs. streaming.** Dados de alfabetização são de baixa frequência por natureza (avaliações anuais) — batch é o caminho natural para o histórico. O streaming (exigência do desafio) foi implementado como **simulação**: um produtor Python publica eventos em Azure Event Hubs e um consumer Spark Structured Streaming grava na Bronze particionado por `tipo_mensagem/ano/mes/dia`. Para fins de avaliação, a execução do fluxo foi simulada (eventos de exemplo depositados na Bronze), com o desenho completo versionado em `pipeline/ingestao/stream/`.
+
+**Parquet em todas as camadas.** Formato colunar e comprimido: reduz storage, acelera leitura (só as colunas consultadas são lidas) e é nativo do Spark e do Power BI.
+
+**Schema explícito onde importa.** No TS_ALUNO (2,2M linhas), `inferSchema` custaria uma varredura extra do arquivo inteiro — o schema das 27 colunas foi declarado manualmente. Nos eventos de streaming, o schema explícito elimina o risco de `_corrupt_record` na inferência de JSON.
+
+**Pipeline separada para o TS_ALUNO.** O volume (2,2M vs. no máximo ~24k linhas das demais fontes) justifica notebooks próprios: reprocessar as fontes pequenas não deve custar o tempo do arquivo grande.
+
+**Quatro fatos em vez de um.** Cada fonte de meta tem granularidade própria (município, UF, Brasil). Misturar níveis numa tabela única quebraria agregações no BI (dupla contagem). Um fato por granularidade é o padrão dimensional correto.
+
+## 5. Descobertas e correções documentadas
+
+Estes casos reais foram investigados e corrigidos durante o desenvolvimento — registrados aqui como evidência de qualidade do processo:
+
+1. **Join de metas 100% vazio.** `municipio.rede` usa códigos numéricos (0, 2, 3, 5) e `meta_alfabetizacao_municipio.rede` usa texto ("Municipal") — o join nunca casava. A correção aplicou o de-para oficial consultado na tabela `dicionario` da Base dos Dados **via BigQuery** (não assumido): 0=Total, 1=Federal, 2=Estadual, 3=Municipal, 4=Privada, 5=Pública (Estadual e Municipal), 6=Pública (todas).
+
+2. **Metas ausentes são realidade da fonte, não bug.** Só existe meta municipal para a rede Municipal, e a meta por UF cobre apenas a rede "Pública". Linhas sem meta permanecem com `NULL` na Gold (LEFT JOIN preserva o realizado) — filtrar seria descartar dado legítimo; a decisão de exibir ou não fica na camada de visualização.
+
+3. **BLANK em subtração DAX vira zero silenciosamente.** O Acre não possui meta para 2024; a medida de gap (`taxa − meta`) retornava um "gap fantasma" de +51 p.p. porque o DAX trata BLANK como 0. Correção: `ISBLANK()` antes da subtração — UFs sem meta saem do ranking em vez de aparecer com valor absurdo.
+
+4. **Falso alarme de corrupção de dados.** A proficiência parecia "7,8 bilhões" numa amostra aberta no Excel; a verificação no CSV bruto mostrou o valor correto (`781.7763317`) — era artefato de formatação do Excel. Lição registrada: validar sempre na fonte antes de "corrigir".
+
+## 6. Qualidade de dados
+
+Notebooks dedicados (`monitoramento_pipeline_silver` e `monitoramento_pipeline_prata`) cobrem as quatro checagens exigidas:
+
+- **Duplicidade** — `count()` vs. `dropDuplicates().count()` por dataset;
+- **Valores ausentes** — contagem de nulos por coluna, com foco nas chaves;
+- **Integridade de chave** — anti-join (`left_anti`) valida que todo `id_municipio` do fato existe na dimensão;
+- **Consistência entre tabelas** — cruzamentos UF×Meta UF, Município×Meta Município e TS_ALUNO×Município.
+
+Além das checagens, os notebooks registram **monitoramento operacional**: volume processado por dataset, latência de leitura e alertas.
+
+## 7. FinOps
+
+- **Parquet colunar + comprimido** em todas as camadas — menos storage, queries mais baratas;
+- **`fato_indicador` particionado por ano** — consultas filtradas leem só a partição necessária;
+- **Spark Pool Small (4 vCores) com pausa automática em 5 min** — zero custo ocioso;
+- **Storage LRS** — redundância local é suficiente para o caso; mais barata que GRS;
+- **Política de ciclo de vida** (Terraform): dados da Bronze migram para tier Cool após 30 dias e Archive após 90;
+- **Schema explícito no TS_ALUNO** — evita a varredura extra do `inferSchema` em 2,2M linhas.
+
+## 8. Segurança
+
+- **Nenhuma credencial no código**: os notebooks leem a chave do Storage em runtime via `mssparkutils.credentials.getSecret()` do **Azure Key Vault**;
+- **RBAC com menor privilégio**: Synapse acessa Key Vault como *Key Vault Secrets User* e o Storage como *Storage Blob Data Contributor* (via identidade gerenciada); o Power BI lê a Gold com *Storage Blob Data Reader* (somente leitura);
+- Segredos locais ficam em `.env` (fora do versionamento — ver `.env.example`).
+
+## 9. Aplicação em IA (potencial da camada Gold)
+
+A Gold foi modelada para servir diretamente a casos de uso de IA — não implementados neste desafio, conforme escopo, mas viabilizados pela estrutura:
+
+- **Predição de risco de não-alfabetização por município** — o `fato_aluno_agregado` (proficiência média, % alfabetizados, nº de avaliados) combinado com o histórico do `fato_indicador` fornece features prontas para um modelo de classificação/regressão que antecipe municípios em risco de não atingir a meta de 2030;
+- **Clusterização de perfis municipais** — agrupar municípios por padrão de desempenho (proficiência × gap × participação) para direcionar políticas diferenciadas por perfil, em vez de ações uniformes;
+- **Priorização de recursos** — ranquear municípios pelo gap projetado vs. meta, apoiando decisão de alocação de investimento educacional;
+- **Séries temporais** — à medida que novos ciclos anuais forem ingeridos (a pipeline já particiona por ano), modelos de tendência podem projetar a trajetória de cada UF rumo às metas 2025–2030.
+
+## 10. Dashboard (Power BI)
+
+Painel Nacional de Alfabetização conectado **diretamente à Gold** (ADLS Gen2, modo Import) com **zero transformação no Power Query** — todo tratamento pertence à pipeline. Inclui KPIs nacionais (taxa, meta, gap, alunos avaliados), comparação Meta vs. Realizado por UF com cor condicional, ranking Top/Bottom 5 (com tratamento de UFs sem meta) e comparação por região. Medidas DAX documentadas com cabeçalho padrão (descrição, fonte, regra de negócio, dependências).
+
+## 11. Estrutura do repositório
 
 ```text
 fiap-ds-ia-tech-challenge-2/
 ├── doc/
-│   ├── arquitetura/
-│   │   └── arquitetura.md
+│   ├── arquitetura/          # diagrama draw.io + arquitetura.md
 │   ├── finops/
 │   └── uteis/
 ├── infra/
-│   └── terraform/
+│   └── terraform/            # IaC: RG, ADLS Gen2, containers, Synapse, Spark Pool, Key Vault, RBAC
 │       ├── main.tf
 │       └── variables.tf
 ├── pipeline/
 │   ├── camadas/
-│   │   ├── bronze/
-│   │   │   └── bronze_alfabetizacao.ipynb
-│   │   ├── prata/
-│   │   │   └── silver_alfabetizacao.ipynb
-│   │   └── ouro/
-│   │       └── gold_alfabetizacao.ipynb
+│   │   ├── bronze/           # bronze_alfabetizacao.ipynb · bronze_ts_aluno.ipynb
+│   │   ├── prata/            # silver_alfabetizacao.ipynb · silver_ts_aluno.ipynb
+│   │   ├── ouro/             # gold_alfabetizacao.ipynb · gold_ts_aluno.ipynb
+│   │   └── monitoramento/    # monitoramento_pipeline_silver.ipynb · monitoramento_pipeline_prata.ipynb
 │   └── ingestao/
-│       ├── batch/
-│       │   └── batch.py
-│   │   ├── stream/
-│   │   │   ├── consumer.py
-│   │   │   └── producer.py
+│       ├── batch/batch.py            # desenho batch (execução simulada — ver nota de escopo no arquivo)
+│       ├── stream/producer.py        # produtor de eventos (Event Hubs)
+│       ├── stream/consumer.py        # consumer Spark Structured Streaming
 │       ├── config.py
 │       └── mock_support.py
 ├── tests/
-│   ├── test_config.py
-│   └── test_mock_support.py
 ├── .env.example
 ├── .gitignore
 ├── requirements.txt
 └── README.md
 ```
 
-## Pré-requisitos
+> **Nota de escopo (streaming e batch standalone):** os scripts em `pipeline/ingestao/` representam a arquitetura pretendida em produção. Para fins do desafio, a execução foi simulada (eventos/arquivos de exemplo depositados na Bronze) — a nota de escopo está registrada no cabeçalho de cada script.
 
-- Python 3.10 ou superior
-- Terraform 1.5 ou superior (opcional para provisionamento da infraestrutura)
-- Conta e credenciais Azure para execução em nuvem
-- Jupyter Notebook opcional para abrir os notebooks
+> **Nota sobre o Terraform:** o IaC descreve fielmente a infraestrutura implantada (Synapse, Spark Pool, Key Vault, RBAC, containers `bronze`/`silver`/`gold`); o provisionamento original foi realizado via portal Azure, e o Terraform está versionado como referência reproduzível.
 
-## O que precisa existir no Azure antes de rodar
+## 12. Pré-requisitos
 
-> Importante: o projeto não roda de forma totalmente autônoma apenas com o código. Ele depende de alguns recursos Azure já criados ou provisionados previamente.
+- Python 3.10+ · Terraform 1.5+ (opcional) · Conta Azure (Storage ADLS Gen2, Synapse, Key Vault) · Power BI Desktop (para o dashboard)
 
-Antes de usar o fluxo de batch e a simulação local de streaming, a pessoa precisa ter criado no Azure:
+## 13. Como executar
 
-1. um Resource Group;
-2. uma Storage Account com Data Lake Gen2 habilitado;
-3. um container chamado bronze;
-4. se for usar o batch, um caminho de entrada com um arquivo CSV para leitura.
-
-### Checklist de criação no Azure
-
-1. Acesse o portal Azure ou Azure CLI e crie um Resource Group.
-2. Crie uma Storage Account e ative o suporte a Data Lake Gen2.
-3. Dentro da Storage Account, crie o container bronze.
-4. Se o batch for usado, coloque um arquivo CSV em um caminho acessível pela aplicação, por exemplo em uma pasta de entrada no Data Lake ou em um diretório local.
-5. Preencha as variáveis de ambiente com os valores corretos.
-
-O projeto espera que os nomes e valores abaixo sejam informados nas variáveis de ambiente:
-
-- STORAGE_ACCOUNT_NAME ou o nome da Storage Account usada pelo script batch;
-- TABLE_NAME com o nome da entidade/tabela processada.
-
-Se a infraestrutura ainda não existir, o Terraform pode ser usado para provisionar a base inicial a partir de [infra/terraform/main.tf](infra/terraform/main.tf).
-
-### Provisionamento com Terraform
-
-Exemplo de fluxo inicial:
+### Provisionamento (Terraform)
 
 ```bash
 cd infra/terraform
 terraform init
-terraform plan -var="resource_group_name=rg-tech-challenge-fase2" -var="storage_account_name=seu-storage-account" -var="data_factory_name=adf-alfabetizacao-pipeline"
-terraform apply -var="resource_group_name=rg-tech-challenge-fase2" -var="storage_account_name=seu-storage-account" -var="data_factory_name=adf-alfabetizacao-pipeline"
+terraform plan
+terraform apply
 ```
 
-Depois do apply, os outputs retornam o nome do resource group, da Storage Account e do Data Factory para facilitar a configuração das variáveis do projeto.
+A senha do administrador SQL do Synapse é variável sensível — informe via `terraform.tfvars` (fora do versionamento) ou variável de ambiente `TF_VAR_synapse_sql_admin_password`. Os defaults das demais variáveis já refletem os nomes do projeto (`rg-alfabetizacao`, `stalfalfabetizacao`, `synapse-alfabetizacao`, `kv-alfabetizacao`).
 
-## Configuração rápida
-
-1. Clone o repositório.
-2. Crie um ambiente virtual e instale as dependências:
+### Configuração local
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate  # Linux/macOS
-.\.venv\Scripts\activate  # Windows PowerShell
+source .venv/bin/activate      # Linux/macOS
+.\.venv\Scripts\activate       # Windows PowerShell
 pip install -r requirements.txt
+cp .env.example .env           # preencher com os valores do ambiente
 ```
 
-3. Copie o arquivo de exemplo de variáveis de ambiente:
+### Pipeline (Azure Synapse)
 
-```bash
-cp .env.example .env
-```
+Com os dados brutos no container `bronze`, executar os notebooks na ordem:
 
-4. Preencha as variáveis com os valores do seu ambiente.
+1. `bronze_alfabetizacao.ipynb` → 2. `silver_alfabetizacao.ipynb` → 3. `gold_alfabetizacao.ipynb`
+4. `bronze_ts_aluno.ipynb` → 5. `silver_ts_aluno.ipynb` → 6. `gold_ts_aluno.ipynb`
+7. Notebooks de monitoramento (qualidade de dados) a qualquer momento após a Silver.
 
-Exemplo de conteúdo do arquivo .env para Azure:
-
-```env
-STORAGE_ACCOUNT_NAME=seu-storage-account
-TABLE_NAME=alfabetizacao
-```
-
-## Variáveis de ambiente
-
-Os valores abaixo devem ser preenchidos no arquivo .env antes de executar qualquer fluxo que dependa de Azure ou dos notebooks.
-
-As principais variáveis esperadas são:
-
-- STORAGE_ACCOUNT_NAME: nome da Storage Account do Azure.
-- TABLE_NAME: nome da tabela/entidade processada no batch.
-- KEY_VAULT_URL: URL do Azure Key Vault usado pelos notebooks para ler a chave de acesso.
-- KEY_VAULT_SECRET_NAME: nome do segredo que armazena a chave da Storage Account.
-- AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID: credenciais opcionais para autenticação Azure.
-
-## Como executar
-
-A execução pode seguir duas abordagens principais:
-
-### Opção A: execução com Azure (ambiente real)
-
-### 1. Ingestão batch
-
-```bash
-python pipeline/ingestao/batch/batch.py --TABLE_NAME alfabetizacao --STORAGE_ACCOUNT stterraformstate
-```
-
-O script lê um CSV bruto e grava os dados particionados na camada Bronze.
-
-### 2. Ingestão streaming
-
-Em dois terminais, execute:
+### Simulação de streaming (opcional, local)
 
 ```bash
 # Terminal 1
 python pipeline/ingestao/stream/consumer.py
-```
-
-```bash
 # Terminal 2
 python pipeline/ingestao/stream/producer.py
 ```
 
-O produtor gera mensagens simuladas localmente e o consumidor lê essas mensagens e grava os payloads na camada Bronze.
+### Modo mock (sem Azure)
 
-### 3. Pipelines de transformação
-
-Depois que a ingestão estiver funcionando, a ordem recomendada para execução dos notebooks é:
-
-1. pipeline/camadas/bronze/bronze_alfabetizacao.ipynb
-2. pipeline/camadas/prata/silver_alfabetizacao.ipynb
-3. pipeline/camadas/ouro/gold_alfabetizacao.ipynb
-
-
-### Opção B: execução sem Azure (modo mock)
-
-Se a pessoa quiser validar a estrutura do fluxo sem depender de recursos cloud, é possível usar os helpers de mock incluídos em [pipeline/ingestao/mock_support.py](pipeline/ingestao/mock_support.py).
-
-Exemplo:
+Helpers em `pipeline/ingestao/mock_support.py` permitem validar a estrutura de payloads sem recursos cloud:
 
 ```python
 from pathlib import Path
@@ -210,45 +213,10 @@ write_mock_csv(Path("tmp/mock.csv"), table_name="alfabetizacao")
 append_mock_message(Path("tmp/mock_messages.jsonl"), {"tipo_mensagem": "dados_aluno", "ID_ALUNO": 123})
 ```
 
-Essa opção é útil para testar a lógica de preparação de dados e a estrutura de payloads antes de conectar a ambientes Azure reais.
+## 14. Fluxo de versionamento
 
+Desenvolvimento em branches por feature → Pull Request → review de outro membro → merge em `develop` → merge final em `main` para a entrega. O histórico de commits e PRs evidencia a evolução da pipeline.
 
-## Potenciais Aplicações em IA e Advanced Analytics
+---
 
-Com a base de dados consolidada, limpa e modelada na camada **Ouro**, o ecossistema está pronto para alimentar modelos de Inteligência Artificial e Machine Learning. A estrutura em camadas (Medallion) garante a consistência necessária para os seguintes cenários de aplicação na gestão pública:
-
-### 1. Previsão de Risco e Alerta Precoce
-* **Objetivo:** Antecipar quais municípios ou redes escolares correm o risco de não atingir as metas de alfabetização estabelecidas.
-* **Abordagem Técnica:** Implementação de modelos de classificação binária ou multiclasse (como *Random Forest*, *XGBoost* ou *Regressão Logística*). Ao analisar os dados históricos e os eventos em tempo real vindos da esteira de streaming, o modelo calcula a probabilidade de inadimplência da meta, permitindo que a secretaria de educação atue de forma preventiva antes das avaliações oficiais.
-
-### 2. Identificação de Fatores Determinantes (Interpretabilidade)
-* **Objetivo:** Descobrir quais variáveis (socioeconômicas, infraestrutura escolar, frequência, etc.) mais impactam o sucesso do aprendizado.
-* **Abordagem Técnica:** Utilização de algoritmos baseados em árvores e técnicas de explicabilidade global e local (como valores *SHAP* ou *Feature Importance*). Isso remove o aspecto de "caixa-preta" da IA, permitindo que os gestores entendam, por exemplo, se a falta de recursos digitais ou a rotatividade de professores é o fator de maior peso estatístico no baixo desempenho de uma determinada região.
-
-### 3. Motores de Recomendação Pedagógica
-* **Objetivo:** Gerar sugestões automáticas de planos de ação personalizados para diretores e gestores públicos.
-* **Abordagem Técnica:** Sistemas de recomendação baseados em filtragem colaborativa ou baseada em conteúdo, que cruzam o perfil de municípios com desafios similares. Se um município superou um problema de alfabetização aplicando uma política "X", o sistema recomenda essa mesma política para municípios vizinhos que apresentam o mesmo comportamento de dados.
-
-### 4. Agrupamento Sociodemográfico (Clustering)
-* **Objetivo:** Agrupar municípios por similaridade real de desafios, indo além das divisões geográficas tradicionais.
-* **Abordagem Técnica:** Isso permite criar "personas" de municípios (ex: *Alta vulnerabilidade socioeconômica com boa infraestrutura escolar* vs. *Baixa vulnerabilidade com falta de insumos*). Com esses clusters, o governo pode distribuir orçamentos e materiais de apoio de forma cirúrgica e justa.
-
-### 5. Análise de Séries Temporais e Projeções de Longo Prazo
-* **Objetivo:** Projetar a evolução dos índices de alfabetização para os próximos 5 ou 10 anos caso as políticas atuais sejam mantidas.
-* **Abordagem Técnica:** Modelagem preditiva temporal essencial para o planejamento orçamentário anual do Estado.
-
-### 6. Auditoria de Dados e Detecção de Anomalias
-* **Objetivo:** Identificar inconsistências, fraudes ou erros de preenchimento nos censos educacionais que chegam via lote ou streaming.
-* **Abordagem Técnica:** Modelos de detecção de *outliers* (como *Isolation Forests*). Se uma escola reportar uma taxa de alfabetização perfeitamente discrepante do seu histórico sem nenhuma mudança estrutural, o sistema emite um alerta para auditoria interna antes que o dado contamine os relatórios analíticos da camada Ouro.
-
-## Checklist final antes de rodar
-
-Antes de iniciar a execução, confirme os itens abaixo:
-
-- [ ] Python instalado
-- [ ] dependências instaladas com pip install -r requirements.txt
-- [ ] arquivo .env criado e preenchido
-- [ ] Resource Group criado no Azure
-- [ ] Storage Account criada e container bronze disponível
-- [ ] arquivo CSV disponível para o batch, se aplicável
-
+*Tech Challenge Fase 2 · FIAP Pós-Tech · Dados: Base dos Dados & INEP (Microdados AEEB 2025) · Julho/2026*
